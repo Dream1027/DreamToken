@@ -1,10 +1,4 @@
 
-/*
-
-Contract by DeFiSCI and Team - built on others previous work w/ a splash of DevTeamSix magic...
-
-*/
-
 // SPDX-License-Identifier: Unlicensed
 
 pragma solidity ^0.8.4;
