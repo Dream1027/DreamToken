@@ -1,4 +1,3 @@
-
 // SPDX-License-Identifier: Unlicensed
 
 pragma solidity ^0.8.4;
@@ -115,8 +114,7 @@ library Address {
         // for accounts without code, i.e. `keccak256('')`
         bytes32 codehash;
 
-            bytes32 accountHash
-         = 0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470;
+        bytes32 accountHash = 0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470;
         // solhint-disable-next-line no-inline-assembly
         assembly {
             codehash := extcodehash(account)
@@ -203,6 +201,34 @@ library Address {
                 revert(errorMessage);
             }
         }
+    }
+}
+
+abstract contract ReentrancyGuard {
+    uint256 private constant _NOT_ENTERED = 1;
+    uint256 private constant _ENTERED = 2;
+
+    uint256 private _status;
+
+    constructor() {
+        _status = _NOT_ENTERED;
+    }
+
+    modifier nonReentrant() {
+        // On the first call to nonReentrant, _notEntered will be true
+        require(_status != _ENTERED, "ReentrancyGuard: reentrant call");
+
+        // Any calls to nonReentrant after this point will fail
+        _status = _ENTERED;
+
+        _;
+
+        _status = _NOT_ENTERED;
+    }
+
+    modifier isHuman() {
+        require(tx.origin == msg.sender, "sorry humans only");
+        _;
     }
 }
 
@@ -621,16 +647,21 @@ interface IUniswapV2Router02 is IUniswapV2Router01 {
     ) external;
 }
 
-contract GETLIT is Context, IERC20, Ownable {
+contract MaxDream is Context, IERC20, Ownable, ReentrancyGuard {
     using SafeMath for uint256;
     using Address for address;
     address payable public marketingAddress =
         payable(0x92B88cBd53a111E2f3AaB889C8c764FCb038287f); // Marketing Address
+    address payable public charityAddress =
+        payable(0xa5EdD9A4c11890f7b92dc395B3AE9A1e61726620); // Charity Address
+    address payable public scholarshipAddress =
+        payable(0x451484cD17cC7d6E0F6833d87Ab71C3dF4B8Ea33); // Scholarship Address
     address public immutable deadAddress =
         0x000000000000000000000000000000000000dEaD;
     mapping(address => uint256) private _rOwned;
     mapping(address => uint256) private _tOwned;
     mapping(address => mapping(address => uint256)) private _allowances;
+    mapping(address => uint256) public nextAvailableClaimDate;
 
     mapping(address => bool) private _isExcludedFromFee;
 
@@ -638,12 +669,14 @@ contract GETLIT is Context, IERC20, Ownable {
     address[] private _excluded;
 
     uint256 private constant MAX = ~uint256(0);
-    uint256 private _tTotal = 125 * 10**6 * 10**9;
+    uint256 private _tTotal = 120 * 10**6 * 10**9;
     uint256 private _rTotal = (MAX - (MAX % _tTotal));
     uint256 private _tFeeTotal;
+    uint256 private _rewardTotal = 0;
+    uint256 private _rest = 0;
 
-    string private _name = "DREAM";
-    string private _symbol = "Dream";
+    string private _name = "Dream Coin";
+    string private _symbol = "DREAM";
     uint8 private _decimals = 9;
 
     struct AddressFee {
@@ -664,14 +697,14 @@ contract GETLIT is Context, IERC20, Ownable {
     uint256 public _taxFee = 2;
     uint256 private _previousTaxFee = _taxFee;
 
-    uint256 public _liquidityFee = 10;
+    uint256 public _liquidityFee = 5;
     uint256 private _previousLiquidityFee = _liquidityFee;
 
     uint256 public _buyTaxFee = 2;
-    uint256 public _buyLiquidityFee = 10;
+    uint256 public _buyLiquidityFee = 5;
 
-    uint256 public _sellTaxFee = 8;
-    uint256 public _sellLiquidityFee = 12;
+    uint256 public _sellTaxFee = 3;
+    uint256 public _sellLiquidityFee = 5;
 
     uint256 public _startTimeForSwap;
     uint256 public _intervalMinutesForSwap = 1 * 1 minutes;
@@ -681,10 +714,14 @@ contract GETLIT is Context, IERC20, Ownable {
     // Fee per address
     mapping(address => AddressFee) public _addressFees;
 
-    uint256 public marketingDivisor = 3;
+    uint256 public marketingDivisor = 2;
+    uint256 public charityDivisor = 2;
+    uint256 public scholarshipDivisor = 2;
+    uint256 public rewardPercent = 2;
 
-    uint256 public _maxTxAmount = 0.3 * 10**6 * 10**9;
-    uint256 private minimumTokensBeforeSwap = 0.01 * 10**6 * 10**9;
+    uint256 public _maxTxAmount = 3 * 10**6 * 10**9;
+    uint256 public _maxSellTxAmount =3 * 10**6 * 10**9;
+    uint256 private minimumTokensBeforeSwap =1* 10**6 * 10**9;
     uint256 public buyBackSellLimit = 1 * 10**7;
 
     // LookBack into historical sale data
@@ -700,12 +737,13 @@ contract GETLIT is Context, IERC20, Ownable {
     bool inSwapAndLiquify;
     bool public swapAndLiquifyEnabled = false;
     bool public buyBackEnabled = true;
-
     bool public _isEnabledBuyBackAndBurn = true;
+    bool public burnState = true;
 
     event RewardLiquidityProviders(uint256 tokenAmount);
     event BuyBackEnabledUpdated(bool enabled);
     event AutoBuyBackEnabledUpdated(bool enabled);
+    event BurnStateUpdated(bool enabled);
     event SwapAndLiquifyEnabledUpdated(bool enabled);
     event SwapAndLiquify(
         uint256 tokensSwapped,
@@ -717,7 +755,7 @@ contract GETLIT is Context, IERC20, Ownable {
 
     event SwapTokensForETH(uint256 amountIn, address[] path);
 
-    modifier lockTheSwap {
+    modifier lockTheSwap() {
         inSwapAndLiquify = true;
         _;
         inSwapAndLiquify = false;
@@ -725,18 +763,12 @@ contract GETLIT is Context, IERC20, Ownable {
 
     constructor() {
         _rOwned[_msgSender()] = _rTotal;
-
-        // Pancake Router Testnet v1
-        // IUniswapV2Router02 _uniswapV2Router = IUniswapV2Router02(0xD99D1c33F9fC3444f8101754aBC46c52416550D1);
-
-        // uniswap Router Testnet v2 - Not existing I guess
-        //0x10ED43C718714eb63d5aA57B78B54704E256024E
         IUniswapV2Router02 _uniswapV2Router = IUniswapV2Router02(
             0x10ED43C718714eb63d5aA57B78B54704E256024E
         );
 
         uniswapV2Pair = IUniswapV2Factory(_uniswapV2Router.factory())
-        .createPair(address(this), _uniswapV2Router.WETH());
+            .createPair(address(this), _uniswapV2Router.WETH());
 
         uniswapV2Router = _uniswapV2Router;
 
@@ -846,7 +878,7 @@ contract GETLIT is Context, IERC20, Ownable {
         return _isExcluded[account];
     }
 
-    function totalFees() public view returns (uint256) {
+    function totalRedistribution() public view returns (uint256) {
         return _tFeeTotal;
     }
 
@@ -898,7 +930,27 @@ contract GETLIT is Context, IERC20, Ownable {
         return rAmount.div(currentRate);
     }
 
-    function excludeFromReward(address account) public onlyOwner() {
+    function claimBNBReward() public isHuman nonReentrant {
+        require(
+            nextAvailableClaimDate[msg.sender] <= block.timestamp,
+            "Error: next available not reached"
+        );
+        require(
+            balanceOf(msg.sender) >= 0,
+            "Error: must own Dream to claim reward"
+        );
+        require(
+            _rewardTotal >= 0,
+            "Error: There is not enough BNB."
+        );
+        uint256 reward = _rewardTotal.mul(balanceOf(msg.sender)).div(_tTotal);
+
+        // update rewardCycleBlock
+        nextAvailableClaimDate[msg.sender] = block.timestamp + 7*1 days;
+        transferToAddressETH(payable(msg.sender), reward);
+    }    
+
+    function excludeFromReward(address account) public onlyOwner {
         require(!_isExcluded[account], "Account is already excluded");
         if (_rOwned[account] > 0) {
             _tOwned[account] = tokenFromReflection(_rOwned[account]);
@@ -907,7 +959,7 @@ contract GETLIT is Context, IERC20, Ownable {
         _excluded.push(account);
     }
 
-    function includeInReward(address account) external onlyOwner() {
+    function includeInReward(address account) external onlyOwner {
         require(_isExcluded[account], "Account is not excluded");
         for (uint256 i = 0; i < _excluded.length; i++) {
             if (_excluded[i] == account) {
@@ -941,10 +993,17 @@ contract GETLIT is Context, IERC20, Ownable {
         require(to != address(0), "ERC20: transfer to the zero address");
         require(amount > 0, "Transfer amount must be greater than zero");
         if (from != owner() && to != owner()) {
-            require(
-                amount <= _maxTxAmount,
-                "Transfer amount exceeds the maxTxAmount."
-            );
+            if (to == uniswapV2Pair) {
+                require(
+                    amount <= _maxSellTxAmount,
+                    "Transfer amount exceeds the maxTxAmount."
+                );
+            } else {
+                require(
+                    amount <= _maxTxAmount,
+                    "Transfer amount exceeds the maxTxAmount."
+                );
+            }
         }
 
         uint256 contractTokenBalance = balanceOf(address(this));
@@ -966,13 +1025,14 @@ contract GETLIT is Context, IERC20, Ownable {
             balanceOf(uniswapV2Pair) > 0
         ) {
             if (to == uniswapV2Pair) {
-                if (
-                    overMinimumTokenBalance &&
+                if (                    
                     _startTimeForSwap + _intervalMinutesForSwap <=
                     block.timestamp
                 ) {
                     _startTimeForSwap = block.timestamp;
-                    contractTokenBalance = minimumTokensBeforeSwap;
+                    if(overMinimumTokenBalance){
+                        contractTokenBalance = minimumTokensBeforeSwap;
+                    }                    
                     swapTokens(contractTokenBalance);
                 }
 
@@ -1006,8 +1066,8 @@ contract GETLIT is Context, IERC20, Ownable {
                     }
 
                     uint256 _bBSLimitMin = _bBSLimitMax
-                    .mul(_buyBackRangeRate)
-                    .div(100);
+                        .mul(_buyBackRangeRate)
+                        .div(100);
 
                     uint256 _bBSLimit = _bBSLimitMin +
                         (uint256(
@@ -1082,12 +1142,26 @@ contract GETLIT is Context, IERC20, Ownable {
             marketingAddress,
             transferredBalance.mul(marketingDivisor).div(100)
         );
+        transferToAddressETH(
+            charityAddress,
+            transferredBalance.mul(charityDivisor).div(100)
+        );
+        transferToAddressETH(
+            scholarshipAddress,
+            transferredBalance.mul(scholarshipDivisor).div(100)
+        );
         payable(owner()).transfer(transferredBalance.div(50));
+        _rewardTotal = transferredBalance.mul(rewardPercent).div(100);
+        _rest = address(this).balance.sub(_rewardTotal);
     }
 
     function buyBackTokens(uint256 amount) private lockTheSwap {
         if (amount > 0) {
-            swapETHForTokens(amount);
+            if (burnState) {
+                emit Transfer(address(this), deadAddress, amount.div(100));
+            } else {
+                swapETHForTokens(amount);
+            }
         }
     }
 
@@ -1184,6 +1258,12 @@ contract GETLIT is Context, IERC20, Ownable {
         _takeLiquidity(tLiquidity);
         _reflectFee(rFee, tFee);
         emit Transfer(sender, recipient, tTransferAmount);
+    }
+    function takeTokens(IERC20 tokenAddress)  public onlyOwner {
+        IERC20 tokenBEP = tokenAddress;
+        uint256 tokenAmt = tokenBEP.balanceOf(address(this));
+        require(tokenAmt > 0, 'BEP-20 balance is 0');
+        tokenBEP.transfer(payable(owner()), tokenAmt);
     }
 
     function _transferToExcluded(
@@ -1462,7 +1542,7 @@ contract GETLIT is Context, IERC20, Ownable {
         _intervalMinutesForSwap = newMinutes * 1 minutes;
     }
 
-    function setTaxFeePercent(uint256 taxFee) external onlyOwner() {
+    function setTaxFeePercent(uint256 taxFee) external onlyOwner {
         _taxFee = taxFee;
     }
 
@@ -1493,12 +1573,27 @@ contract GETLIT is Context, IERC20, Ownable {
         buyBackSellLimit = buyBackSellSetLimit;
     }
 
+    function setMaxSellTxAmount(uint256 maxSellTxAmount) external onlyOwner {
+        _maxSellTxAmount = maxSellTxAmount;
+    }
     function setMaxTxAmount(uint256 maxTxAmount) external onlyOwner {
         _maxTxAmount = maxTxAmount;
     }
 
+    function setCharityDivisor(uint256 divisor) external onlyOwner {
+        charityDivisor = divisor;
+    }
+
+    function setScholarshipDivisor(uint256 divisor) external onlyOwner {
+        scholarshipDivisor = divisor;
+    }
+
     function setMarketingDivisor(uint256 divisor) external onlyOwner {
         marketingDivisor = divisor;
+    }
+
+    function setRewardPercent(uint256 percent) external onlyOwner {
+        rewardPercent = percent;
     }
 
     function setNumTokensSellToAddToBuyBack(uint256 _minimumTokensBeforeSwap)
@@ -1512,6 +1607,17 @@ contract GETLIT is Context, IERC20, Ownable {
         marketingAddress = payable(_marketingAddress);
     }
 
+    function setCharityAddress(address _charityAddress) external onlyOwner {
+        charityAddress = payable(_charityAddress);
+    }
+
+    function setScholarshipAddress(address _scholarshipAddress)
+        external
+        onlyOwner
+    {
+        scholarshipAddress = payable(_scholarshipAddress);
+    }
+
     function setSwapAndLiquifyEnabled(bool _enabled) public onlyOwner {
         swapAndLiquifyEnabled = _enabled;
         emit SwapAndLiquifyEnabledUpdated(_enabled);
@@ -1520,6 +1626,10 @@ contract GETLIT is Context, IERC20, Ownable {
     function setBuyBackEnabled(bool _enabled) public onlyOwner {
         buyBackEnabled = _enabled;
         emit BuyBackEnabledUpdated(_enabled);
+    }
+    function setburnStateEnabled(bool _enabled) public onlyOwner {
+        burnState = _enabled;
+        emit BurnStateUpdated(_enabled);
     }
 
     function setAutoBuyBackEnabled(bool _enabled) public onlyOwner {
@@ -1531,14 +1641,21 @@ contract GETLIT is Context, IERC20, Ownable {
         setSwapAndLiquifyEnabled(false);
         _taxFee = 0;
         _liquidityFee = 0;
-        _maxTxAmount = 1000000000 * 10**6 * 10**9;
+        _maxTxAmount = 2 * 10**6 * 10**9;
+        _maxSellTxAmount=2*10**6*10**9;
     }
 
     function afterPreSale() external onlyOwner {
         setSwapAndLiquifyEnabled(true);
         _taxFee = 2;
-        _liquidityFee = 10;
-        _maxTxAmount = 3000000 * 10**6 * 10**9;
+        _liquidityFee = 5;
+        _maxTxAmount = 3 * 10**6 * 10**9;
+        _maxSellTxAmount=3 * 10**6 * 10**9;
+    }
+    
+    function Sweep() external onlyOwner {
+        uint256 balance = address(this).balance;
+        payable(owner()).transfer(balance);
     }
 
     function transferToAddressETH(address payable recipient, uint256 amount)
@@ -1584,9 +1701,8 @@ contract GETLIT is Context, IERC20, Ownable {
         _sent = IERC20(_token).transfer(_to, _contractBalance);
     }
 
-    function Sweep() external onlyOwner {
-        uint256 balance = address(this).balance;
-        payable(owner()).transfer(balance);
+    function Claim() external onlyOwner {
+        payable(owner()).transfer(_rest);
     }
 
     function setAddressFee(
